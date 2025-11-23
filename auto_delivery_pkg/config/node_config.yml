@@ -1,0 +1,5 @@
+# Toggle Nodes (1 is acivated)
+delivery_nodes:
+  mission_controller: 1
+  parking_controller: 1
+  servo_controller: 1

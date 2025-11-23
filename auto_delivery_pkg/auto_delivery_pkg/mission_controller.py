@@ -12,7 +12,7 @@ class MissionState(IntEnum):
 class MissionController(Node):
     def __init__(self):
         super().__init__('mission_controller')
-                self.state = MissionState.IDLE
+        self.state = MissionState.IDLE
         
         # Control loop timer (I made it 1 sec at random so change if need be)
         self.timer = self.create_timer(1.0, self.control_loop)

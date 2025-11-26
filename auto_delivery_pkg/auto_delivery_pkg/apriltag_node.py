@@ -1,100 +1,133 @@
 import rclpy
 from rclpy.node import Node
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge
 import depthai as dai
 import cv2
 import numpy as np
+from pupil_apriltags import Detector
 
-class ApriltagNode(Node):
+class LocalAprilTagNode(Node):
     def __init__(self):
         super().__init__('apriltag_node')
-        self.get_logger().info('April Tag Node started')
-        self.run_depthai()
+        self.get_logger().info('April Tag Node Started (CPU Detection - Auto Focus)')
 
-    def run_depthai(self):
-        # --- 1. Create Pipeline ---
+        self.bridge = CvBridge()
+        self.image_pub = self.create_publisher(Image, 'camera/apriltag_image', 10)
+
+        # --- 1. SETUP LOCAL DETECTOR ---
+        # We run this on the Pi's CPU, not the Camera
+        self.get_logger().info("Initializing pupil_apriltags detector...")
+        self.detector = Detector(
+            families='tag36h11',
+            nthreads=1,
+            quad_decimate=1.0, # 1.0 = Max accuracy, 2.0 = Faster (less range)
+            quad_sigma=0.0,
+            refine_edges=1,
+            decode_sharpening=0.25,
+            debug=0
+        )
+
+        # --- 2. SETUP CAMERA STREAM ---
+        self.init_depthai()
+
+        # Timer loop (30 FPS target)
+        self.timer = self.create_timer(0.033, self.timer_callback)
+
+    def init_depthai(self):
         pipeline = dai.Pipeline()
 
-        # Define Color Camera
+        # Define RGB Camera
         cam_rgb = pipeline.create(dai.node.ColorCamera)
         cam_rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
-        
-        # OPTIMIZATION: Set preview to 640x480 (VGA) for high-speed detection
-        # This makes the AprilTag algorithm run much faster than on 1080p
-        cam_rgb.setPreviewSize(640, 480)
-        
         cam_rgb.setInterleaved(False)
         cam_rgb.setFps(30)
-        cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
         
-        # Force Auto-Focus
+        # --- FOCUS SETTINGS ---
+        # REMOVED: Manual Focus Lock
+        # ENABLED: Continuous Auto Focus
         cam_rgb.initialControl.setAutoFocusMode(dai.CameraControl.AutoFocusMode.CONTINUOUS_VIDEO)
 
-        # Define AprilTag Node
-        april_tag = pipeline.create(dai.node.AprilTag)
-        
-        # Config: Use 36h11 Family
-        april_config = april_tag.initialConfig.get()
-        april_config.family = dai.AprilTagConfig.Family.TAG_36H11
-        april_tag.initialConfig.set(april_config)
+        # RESIZE FOR CPU:
+        # 640x480 is standard for Pi CPU processing
+        cam_rgb.setPreviewSize(640, 480)
 
-        # CRITICAL FIX: Link the smaller 'preview' to AprilTag input (not high-res video)
-        cam_rgb.preview.link(april_tag.inputImage) 
-
-        # Create XLink Outputs
+        # Output Stream
         xout_rgb = pipeline.create(dai.node.XLinkOut)
         xout_rgb.setStreamName("rgb")
-        cam_rgb.preview.link(xout_rgb.input) # Stream the 640x480 preview
+        cam_rgb.preview.link(xout_rgb.input)
 
-        xout_april = pipeline.create(dai.node.XLinkOut)
-        xout_april.setStreamName("april")
-        april_tag.out.link(xout_april.input)
+        # Connect to Device
+        self.device = dai.Device(pipeline)
+        self.q_rgb = self.device.getOutputQueue(name="rgb", maxSize=4, blocking=False)
+        
+        self.get_logger().info("OAK-D Streaming RGB (640x480). Auto-Focus Enabled.")
 
-        # --- 2. Connect to Device ---
-        self.get_logger().info("Connecting to OAK-D (High Speed Mode)...")
-        with dai.Device(pipeline) as device:
-            q_rgb = device.getOutputQueue(name="rgb", maxSize=4, blocking=False)
-            q_april = device.getOutputQueue(name="april", maxSize=4, blocking=False)
+    def timer_callback(self):
+        # 1. Get Frame from Camera
+        in_rgb = self.q_rgb.tryGet()
 
-            self.get_logger().info("OAK-D Running at 640x480. Press 'q' to quit.")
+        if in_rgb is not None:
+            frame = in_rgb.getCvFrame()
 
-            while rclpy.ok():
-                in_rgb = q_rgb.tryGet()
-                in_april = q_april.tryGet()
+            # 2. Prepare for Detection
+            # AprilTag algo requires Grayscale
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-                if in_rgb is not None:
-                    frame = in_rgb.getCvFrame()
+            # 3. Run Detection (ON CPU)
+            detections = self.detector.detect(
+                gray, 
+                estimate_tag_pose=False, 
+                camera_params=None, 
+                tag_size=None
+            )
 
-                    if in_april is not None:
-                        for detection in in_april.aprilTags:
-                            # No interpolation needed if we display the raw 640x480 preview!
-                            # The detection coordinates match the frame size exactly now.
-                            xTL = int(detection.topLeft.x)
-                            yTL = int(detection.topLeft.y)
-                            xBR = int(detection.bottomRight.x)
-                            yBR = int(detection.bottomRight.y)
-                            
-                            center_x = int(xTL + (xBR - xTL) / 2)
-                            center_y = int(yTL + (yBR - yTL) / 2)
+            # 4. Process & Visualize Results
+            for detection in detections:
+                tag_id = detection.tag_id
+                center = detection.center
+                corners = detection.corners
 
-                            # Visuals
-                            cv2.rectangle(frame, (xTL, yTL), (xBR, yBR), (0, 255, 0), 2)
-                            cv2.putText(frame, f"ID: {detection.id}", (xTL, yTL - 10), 
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-                            
-                            self.get_logger().info(f"Tag Found! ID: {detection.id} | Center: ({center_x}, {center_y})")
+                # --- Draw logic ---
+                # Draw Center Dot (Red)
+                cx, cy = int(center[0]), int(center[1])
+                cv2.circle(frame, (cx, cy), 5, (0, 0, 255), -1)
 
-                    cv2.imshow("OAK-D AprilTag High-Speed", frame)
+                # Draw Corners (Green Box)
+                pts = np.array(corners, dtype=np.int32)
+                pts = pts.reshape((-1, 1, 2))
+                cv2.polylines(frame, [pts], True, (0, 255, 0), 2)
 
-                if cv2.waitKey(1) == ord('q'):
-                    break
+                # Draw ID Text
+                txt_x, txt_y = int(corners[0][0]), int(corners[0][1] - 10)
+                cv2.putText(frame, f"ID: {tag_id}", (txt_x, txt_y),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-            cv2.destroyAllWindows()
+                # Console Log
+                self.get_logger().info(f"Tag Found: ID {tag_id} at ({cx}, {cy})")
+
+            # 5. Show GUI
+            cv2.imshow("Local CPU Detection", frame)
+            cv2.waitKey(1)
+
+            # 6. Publish to ROS
+            try:
+                msg = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
+                self.image_pub.publish(msg)
+            except Exception as e:
+                pass
 
 def main(args=None):
     rclpy.init(args=args)
-    node = AprilTagNode()
-    node.destroy_node()
-    rclpy.shutdown()
+    node = LocalAprilTagNode()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+        cv2.destroyAllWindows()
 
 if __name__ == '__main__':
     main()

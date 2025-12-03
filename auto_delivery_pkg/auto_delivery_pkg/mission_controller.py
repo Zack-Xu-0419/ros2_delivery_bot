@@ -2,6 +2,8 @@ import rclpy
 from rclpy.node import Node
 from enum import IntEnum, auto
 
+from geometry_msgs.msg import Twist
+
 class MissionState(IntEnum):
     IDLE = auto()
     SEARCHING = auto()
@@ -12,34 +14,67 @@ class MissionState(IntEnum):
 class MissionController(Node):
     def __init__(self):
         super().__init__('mission_controller')
-        self.state = MissionState.IDLE
         
-        # Control loop timer (I made it 1 sec at random so change if need be)
-        self.timer = self.create_timer(1.0, self.control_loop)
+        # Create Publisher for cmd_vel
+        # Queue size of 10 is standard
+        self.publisher_ = self.create_publisher(Twist, '/cmd_vel', 10)
         
-        self.get_logger().info('Mission Controller Node Started')
+        # Change timer to 0.1 seconds (10Hz) for smoother control
+        self.timer = self.create_timer(0.1, self.control_loop)
+        
+        # Variables to track logic
+        self.moving = True
+        self.counter = 0
+        self.switch_time = 30 # 30 ticks * 0.1s = 3 seconds
+
+        self.get_logger().info('Mission Controller: Move/Stop Cycle Started')
 
     def control_loop(self):
-        self.get_logger().info(f'CURRENT STATE: [{self.state.name}]')
+        # Create the message object
+        msg = Twist()
 
-        if self.state == MissionState.IDLE:
-            self.get_logger().info("Waiting for mission start...")
-            self.state = MissionState.SEARCHING
+        # LOGIC: Toggle between moving and stopping based on the counter
+        if self.moving:
+            msg.linear.x = 0.5  # Move forward at 0.5 m/s
+            msg.angular.z = 0.0 # No rotation
+            self.get_logger().info(f'Moving... ({self.counter}/{self.switch_time})')
+        else:
+            msg.linear.x = 0.0  # Stop
+            msg.angular.z = 0.0
+            self.get_logger().info(f'Stopped... ({self.counter}/{self.switch_time})')
 
-        elif self.state == MissionState.SEARCHING:
-            self.get_logger().info("Locating apriltagS")
-            self.state = MissionState.PARKING
+        # Publish the message
+        self.publisher_.publish(msg)
+        
+        # Increment counter
+        self.counter += 1
 
-        elif self.state == MissionState.PARKING:
-            self.get_logger().info("Backing up")
-            self.state = MissionState.DELIVERING
+        # Check if it is time to switch states
+        if self.counter >= self.switch_time:
+            self.moving = not self.moving # Toggle the boolean
+            self.counter = 0              # Reset counter
 
-        elif self.state == MissionState.DELIVERING:
-            self.get_logger().info("Dropping Package")
-            self.state = MissionState.RETURNING
+    # def control_loop(self):
+    #     self.get_logger().info(f'CURRENT STATE: [{self.state.name}]')
 
-        elif self.state == MissionState.RETURNING:
-            self.get_logger().info("Mission Complete.")
+    #     if self.state == MissionState.IDLE:
+    #         self.get_logger().info("Waiting for mission start...")
+    #         self.state = MissionState.SEARCHING
+
+    #     elif self.state == MissionState.SEARCHING:
+    #         self.get_logger().info("Locating apriltagS")
+    #         self.state = MissionState.PARKING
+
+    #     elif self.state == MissionState.PARKING:
+    #         self.get_logger().info("Backing up")
+    #         self.state = MissionState.DELIVERING
+
+    #     elif self.state == MissionState.DELIVERING:
+    #         self.get_logger().info("Dropping Package")
+    #         self.state = MissionState.RETURNING
+
+    #     elif self.state == MissionState.RETURNING:
+    #         self.get_logger().info("Mission Complete.")
 
 def main(args=None):
     rclpy.init(args=args)

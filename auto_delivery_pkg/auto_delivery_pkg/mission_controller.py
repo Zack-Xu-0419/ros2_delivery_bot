@@ -1,6 +1,7 @@
 import rclpy
 from rclpy.node import Node
 from enum import IntEnum, auto
+import time
 
 from geometry_msgs.msg import Twist
 
@@ -14,45 +15,54 @@ class MissionState(IntEnum):
 class MissionController(Node):
     def __init__(self):
         super().__init__('mission_controller')
-        
-        # Create Publisher for cmd_vel
-        # Queue size of 10 is standard
         self.publisher_ = self.create_publisher(Twist, '/cmd_vel', 10)
-        
-        # Change timer to 0.1 seconds (10Hz) for smoother control
         self.timer = self.create_timer(0.1, self.control_loop)
         
-        # Variables to track logic
+        # State variables
         self.moving = True
         self.counter = 0
-        self.switch_time = 30 # 30 ticks * 0.1s = 3 seconds
+        self.switch_time = 30 
+        
+        # Safe Start Logic
+        self.start_delay = 100 # 100 ticks * 0.1s = 10 seconds
+        self.boot_counter = 0
+        self.is_initialized = False
 
-        self.get_logger().info('Mission Controller: Move/Stop Cycle Started')
+        self.get_logger().info('Mission Controller: Initialized (Waiting 10s warmup)')
 
     def control_loop(self):
-        # Create the message object
+        # 1. Warmup Phase (Non-blocking replacement for time.sleep)
+        if not self.is_initialized:
+            self.boot_counter += 1
+            if self.boot_counter % 10 == 0:
+                self.get_logger().info(f"Warming up... {self.boot_counter/10}s")
+            
+            if self.boot_counter >= self.start_delay:
+                self.is_initialized = True
+                self.get_logger().info("Warmup Complete. Starting Motion.")
+            return # Exit loop here, don't publish yet
+
+        # 2. Main Logic
         msg = Twist()
-
-        # LOGIC: Toggle between moving and stopping based on the counter
-        if self.moving:
-            msg.linear.x = 0.5  # Move forward at 0.5 m/s
-            msg.angular.z = 0.0 # No rotation
-            self.get_logger().info(f'Moving... ({self.counter}/{self.switch_time})')
-        else:
-            msg.linear.x = 0.0  # Stop
-            msg.angular.z = 0.0
-            self.get_logger().info(f'Stopped... ({self.counter}/{self.switch_time})')
-
-        # Publish the message
-        self.publisher_.publish(msg)
         
-        # Increment counter
+        if self.moving:
+            msg.linear.x = 0.5
+            msg.angular.z = -0.5
+            # Throttle logs to every 1 second (every 10 ticks)
+            if self.counter % 10 == 0: 
+                self.get_logger().info(f'Moving... ({self.counter}/{self.switch_time})')
+        else:
+            msg.linear.x = 0.0
+            msg.angular.z = 0.0
+            if self.counter % 10 == 0:
+                self.get_logger().info(f'Stopped... ({self.counter}/{self.switch_time})')
+
+        self.publisher_.publish(msg)
         self.counter += 1
 
-        # Check if it is time to switch states
         if self.counter >= self.switch_time:
-            self.moving = not self.moving # Toggle the boolean
-            self.counter = 0              # Reset counter
+            self.moving = not self.moving
+            self.counter = 0
 
     # def control_loop(self):
     #     self.get_logger().info(f'CURRENT STATE: [{self.state.name}]')
